@@ -64,10 +64,14 @@ class DependencyScanner:
         if path.is_file():
             deps = self._parse_manifest(path)
         else:
-            for f in path.rglob("package.json"):
+            for f in path.rglob("*package.json"):
                 if "node_modules" not in str(f): deps.extend(self._parse_manifest(f))
-            for f in path.rglob("requirements.txt"):
+            for f in path.rglob("*requirements*.txt"):
                 if "venv" not in str(f): deps.extend(self._parse_manifest(f))
+            for f in path.rglob("Cargo.toml"):
+                if "target" not in str(f): deps.extend(self._parse_manifest(f))
+            for f in path.rglob("go.mod"):
+                deps.extend(self._parse_manifest(f))
         for dep in deps: self._analyze(dep)
         fail_th = self.config["thresholds"]["fail_score"]
         return ScanResult(str(path), datetime.utcnow(), deps, len(deps),
@@ -79,18 +83,31 @@ class DependencyScanner:
     def _parse_manifest(self, path):
         deps = []
         name = path.name.lower()
-        if name == "package.json":
-            data = json.loads(path.read_text())
-            for n, v in data.get("dependencies", {}).items():
-                deps.append(Dependency(n, re.sub(r"^[\\^~>=<]+", "", v), Ecosystem.NPM, str(path)))
-            for n, v in data.get("devDependencies", {}).items():
-                deps.append(Dependency(n, re.sub(r"^[\\^~>=<]+", "", v), Ecosystem.NPM, str(path), True))
-        elif "requirements" in name:
-            for line in path.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    m = re.match(r"^([a-zA-Z0-9_-]+)", line)
-                    if m: deps.append(Dependency(m.group(1), "latest", Ecosystem.PYPI, str(path)))
+        try:
+            if name.endswith("package.json"):
+                data = json.loads(path.read_text())
+                for n, v in data.get("dependencies", {}).items():
+                    deps.append(Dependency(n, re.sub(r"^[\^~>=<]+", "", str(v)), Ecosystem.NPM, str(path)))
+                for n, v in data.get("devDependencies", {}).items():
+                    deps.append(Dependency(n, re.sub(r"^[\^~>=<]+", "", str(v)), Ecosystem.NPM, str(path), True))
+            elif "requirements" in name and name.endswith(".txt"):
+                for line in path.read_text().splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and not line.startswith("-"):
+                        m = re.match(r"^([a-zA-Z0-9_-]+)", line)
+                        if m: deps.append(Dependency(m.group(1), "latest", Ecosystem.PYPI, str(path)))
+            elif name == "cargo.toml":
+                import toml
+                data = toml.loads(path.read_text())
+                for n, v in data.get("dependencies", {}).items():
+                    ver = v if isinstance(v, str) else v.get("version", "latest")
+                    deps.append(Dependency(n, ver, Ecosystem.CARGO, str(path)))
+            elif name == "go.mod":
+                content = path.read_text()
+                for m in re.finditer(r"^\s*(\S+)\s+v?([\d.]+)", content, re.MULTILINE):
+                    if not m.group(1).startswith("//"): deps.append(Dependency(m.group(1), m.group(2), Ecosystem.GO, str(path)))
+        except Exception as e:
+            print(f"Warning: Error parsing {path}: {e}")
         return deps
     
     def _analyze(self, dep):
